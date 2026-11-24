@@ -1,73 +1,78 @@
-# AquaWatch AI — Starter Project
+# AquaWatch AI
 
-A beginner-friendly prototype for comparing water spread in two lake/tank satellite images.
+AI-powered, satellite-based monitoring of lakes, ponds and other water bodies. AquaWatch AI segments water in satellite imagery, compares two acquisition dates and screens lost-water zones for possible encroachment.
 
-## What works in this starter
+## What it does
 
-- Uploads two files.
-- Previews RGB images and GeoTIFF rasters.
-- For matching, georeferenced multispectral GeoTIFFs, calculates NDWI masks.
-- Compares water loss and gain and estimates pixel area.
-- Exports a PNG change map.
-- Includes a starter U-Net training script and dataset layout.
+1. **Water body detection** - a U-Net segments water in each scene; a classical water index (true NDWI with a NIR band, or an RGB approximation) is used as a fallback and as a cross-check.
+2. **Change detection** - the two masks are compared into *lost*, *gained* and *stable* water layers, with every area reported in hectares.
+3. **Encroachment screening** - lost-water pixels whose surface in the later image looks land-like (vegetation, bare soil, built-up) are grouped into parcels and listed as *candidates*. Damp exposed lake bed scores low, so seasonal retreat is reported as change but not flagged as encroachment.
 
-## Important limitations
+## Project layout
 
-- This is a prototype, not a validated encroachment detector.
-- Red pixels mean mapped water spread loss, not proof of illegal construction or land encroachment.
-- NDWI band positions depend on how your GeoTIFF was exported. Confirm band order.
-- Images must be aligned and use a projected coordinate reference system in metres for trustworthy area calculation.
-- The app currently uses NDWI as its working baseline. It does not automatically use the trained U-Net checkpoint yet.
-- RGB screenshots do not have the spectral information required for NDWI area analysis.
-- The included training script expects prepared `.npy` patches; patch extraction and expert/verified mask creation are separate preprocessing tasks.
+| File | Role |
+|------|------|
+| `app.py` | Streamlit dashboard: uploads, masks, change map, candidate table, downloads |
+| `unet_model.py` | U-Net architecture and checkpoint save/load |
+| `water_detection.py` | Inference wrapper, index fallback, resize helpers |
+| `water_index.py` | NDWI / RGB water index, Otsu thresholding, mask cleanup, area maths |
+| `change_detection.py` | Change layers, statistics, candidates, change map and overlay |
+| `train_unet.py` | Training loop (BCE + Dice, IoU/Dice validation) |
+| `synthetic.py` | Procedural scenes with water masks; writes the demo scenes |
+| `sample_data/` | Bundled before/after demo scenes |
+| `models/water_unet.pt` | Trained checkpoint (<!-- size not legible in screenshot -->), produced by `train_unet.py` |
 
 ## Setup
 
-```bash
+```shell
 python -m venv .venv
-# macOS/Linux
-source .venv/bin/activate
-# Windows PowerShell: .venv\Scripts\Activate.ps1
-
-python -m pip install --upgrade pip
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+```
+
+CPU-only PyTorch install (smaller download):
+
+```shell
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+```
+
+## Run
+
+```shell
+python synthetic.py --out sample_data --size 384   # only if sample_data/ is missing
+python train_unet.py --epochs 4 --size 128          # writes models/water_unet.pt
 streamlit run app.py
 ```
 
-## Recommended first data format
+Open the app, leave **Use the bundled demo scenes** ticked to explore the pipeline immediately, or upload your own before/after images. If `models/water_unet.pt` is absent the app keeps working with the water index and says so.
 
-Use Sentinel-2 surface-reflectance GeoTIFFs containing known bands, ideally B3 (green), B4 (red), B8 (NIR), and B11 (SWIR). Export both years with the same band order, projection, resolution, extent and grid. For NDWI, use B3 and B8. For MNDWI, use B3 and B11, after accounting for B11's native 20 m resolution.
+Training on a 2-core CPU takes about 70 seconds with the default settings (4 epochs x 40 steps of 128x128 images) and reaches a validation IoU of about 0.998 on held-out synthetic scenes.
 
-Use comparable seasons and cloud-screened data. Mask cloud/shadow/no-data pixels before calculating area. Do not compare images until their CRS, transform, dimensions and pixel alignment are confirmed.
+## Using real satellite imagery
 
-## Training data layout
+1. Pick a footprint over your water body.
+2. Export cloud-free Sentinel-2 L2A crops (bands B02/B03/B04 for RGB, B08 for NIR) for two dates from the Copernicus Data Space Browser or Google Earth Engine.
+3. Save each crop as PNG or GeoTIFF at a known ground sampling distance and set **Pixel area (m²)** in the sidebar accordingly (10 m Sentinel-2 = 100 m²).
+4. Optionally upload the NIR band to switch to true NDWI.
 
-```text
-data/patches/
-├── images/
-│   ├── lake01_000.npy  # shape (4, 256, 256), reflectance consistently scaled
-│   └── lake02_000.npy
-└── masks/
-    ├── lake01_000.npy  # shape (256, 256), 1=water, 0=non-water
-    └── lake02_000.npy
-```
+## Configuration knobs
 
-Masks should be reviewed reference labels, not blindly copied from NDWI outputs. Include water, wet soil, shadows, vegetation, buildings and different seasons. Split data by lake or scene before training to avoid leakage.
+- **Method** - <!-- options partly hidden in screenshot: `unet`, `index`, ... -->
+- **Threshold** - Otsu by default; fix a value when you want <!-- rest not legible -->
+- **Minimum water body / change zone** - suppress speckle.
+- **Harmonise brightness** - percentile stretch per date, reduces false change from atmospheric or exposure differences.
+- **Encroachment land-signal threshold** - how land-like a lost zone must look before it is flagged.
 
-Run training after preparing data:
+## Limitations (important)
 
-```bash
-python train_unet.py
-```
+- The shipped checkpoint is trained on **synthetic** scenes generated by `synthetic.py`. It demonstrates the pipeline end to end but does not transfer perfectly to real imagery. Retrain on labelled real chips before operational use; only the dataset class in `train_unet.py` needs replacing.
+- Lost water is not the same as encroachment. Drought, seasonal drawdown and siltation also shrink lakes. Candidates are a prioritisation aid, not proof - confirm with field survey, high-resolution imagery or revenue records.
+- The RGB water index is a proxy for NDWI. Supply a NIR band for quantitative work, and remember that area figures scale with the pixel-area setting.
+- Masks are per-pixel: mixed shoreline pixels, shadows and turbid water are the main error sources.
 
-The current training script uses four input channels. If your patch channels differ, update `in_channels` and the saved checkpoint metadata. The simple random split is only a code demonstration; for real evaluation, split by lake/scene before training.
+## Roadmap ideas
 
-## Suggested next milestones
-
-1. Test the app with two correctly aligned GeoTIFFs from the same lake.
-2. Validate the NDWI threshold against manually reviewed masks.
-3. Add cloud/no-data masking and a robust reprojection/alignment pipeline.
-4. Prepare reviewed labelled patches and train U-Net.
-5. Add U-Net inference to the app using exactly the same band scaling and preprocessing as training.
-6. Add official lake boundary overlays and a human-review status for suspected encroachment.
-7. Evaluate on lakes/dates not used for training before presenting accuracy claims.
+- Real Sentinel-2 chip download and tiling (STAC + `rasterio`).
+- Multi-date time series and a shrinking-area trend chart.
+- Geo-referenced outputs (GeoTIFF masks, KML/GeoJSON zone boundaries).
+- Confidence maps from the U-Net probability output instead of a hard 0.5 cut.
